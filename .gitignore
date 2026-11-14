@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 venv/
 .ipynb_checkpoints/
+.pytest_cache/
 
 # 데이터: 원본 스캔과 중간·최종 결과물 (합쳐서 수 GB). 스크립트가 data/ 아래 폴더를 직접 만든다
 data/
