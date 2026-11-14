@@ -1,0 +1,3 @@
+# 개발과 시험용: 위 패키지에 pytest를 더한다
+-r requirements.txt
+pytest==9.2.0

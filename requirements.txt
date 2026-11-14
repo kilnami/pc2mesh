@@ -1,0 +1,7 @@
+# 코드가 직접 불러오는 패키지만 버전을 고정한다 (Python 3.10에서 시험함).
+# 이 패키지들이 끌고 오는 패키지(pillow, scipy 등)는 pip가 고른다.
+numpy==2.2.6
+open3d==0.20.0
+matplotlib==3.10.9   # 40_nav2_map.py 의 미리보기 그림
+pybullet==3.2.7      # 35_check_pybullet.py
+pye57==0.4.19        # .e57 파일을 읽을 때만 쓴다 (loaders.py)

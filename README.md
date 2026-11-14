@@ -40,9 +40,10 @@ Python 3.10에서 만들고 시험했다.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install open3d==0.20.0 numpy==2.2.6 matplotlib==3.10.9 pybullet==3.2.7 pye57==0.4.19
+pip install -r requirements.txt
 ```
 
+* 코드가 직접 불러오는 패키지만 `requirements.txt`에 버전을 고정했다.
 * `pye57`은 `.e57` 파일을 읽을 때만 쓴다.
 * `36_check_gazebo.py`, `39_check_tiles.py`는 Gazebo Fortress(ROS 2 Humble과 짝인 Ignition Gazebo 6, `ign` 명령)가 있어야 한다.
 
@@ -89,8 +90,8 @@ python 40_nav2_map.py factory                          # nav2 지도
 스크립트를 임시 폴더에 복사해서 돌리므로 내 `data/`는 건드리지 않는다.
 
 ```bash
-pip install pytest
-pytest                    # 전부 (약 2분 반). Gazebo(ign)가 없으면 그 시험만 건너뛴다
+pip install -r requirements-dev.txt    # requirements.txt + pytest
+pytest                    # 전부 (약 2~3분). Gazebo(ign)가 없으면 그 시험만 건너뛴다
 pytest -m "not gazebo"    # Gazebo 없이
 ```
 
