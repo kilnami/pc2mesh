@@ -100,6 +100,7 @@ def main():
     parser.add_argument("--no-view", action="store_true", help="3D 뷰어를 띄우지 않음")
     parser.add_argument("--hide-ceiling", action="store_true", help="뷰어에서 천장을 숨김")
     args = parser.parse_args()
+    o3d.utility.random.seed(0)   # 면 위에서 점을 뽑는 비교 계산이 무작위라서, 같은 입력이면 같은 숫자가 나오게 고정
 
     pcd = o3d.io.read_point_cloud(str(DATA_DIR / "synth_room_normals.ply"))
     gt = o3d.io.read_triangle_mesh(str(DATA_DIR / "synth_room_gt.ply"))

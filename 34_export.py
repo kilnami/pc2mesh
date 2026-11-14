@@ -261,6 +261,7 @@ def main():
     parser.add_argument("--view", choices=["collision", "visual"], default="collision", help="뷰어로 볼 메시")
     parser.add_argument("--no-view", action="store_true", help="3D 뷰어를 띄우지 않음")
     args = parser.parse_args()
+    o3d.utility.random.seed(0)   # 면 위에서 점을 뽑는 계산이 무작위라서, 같은 입력이면 표와 삼각형 수 선택이 같게 고정
 
     folder = DATA_DIR / args.name
     info = json.loads((folder / "inspect.json").read_text())

@@ -105,9 +105,35 @@ def rotation_between(a, b):
     return np.eye(3) + vx + vx @ vx / (1 + c)
 
 
+def ransac_plane(P, dist, iterations=2000, seed=0):
+    """
+    RANSAC으로 가장 많은 점이 지나는 평면을 찾는다. (a, b, c, d)(ax + by + cz + d = 0, 법선은 단위 길이)와 평면 가까이 있는 점 번호를 돌려준다.
+    open3d의 segment_plane은 여러 스레드가 나눠 돌아서 시드를 줘도 같은 입력에서 결과가 조금씩 달랐다. 그래서 시드를 박은 numpy로 직접 한다.
+    """
+    rng = np.random.default_rng(seed)
+    best_count, best = -1, None
+    for tri in rng.integers(0, len(P), size=(iterations, 3)):
+        a, b, c = P[tri]
+        n = np.cross(b - a, c - a)
+        length = np.linalg.norm(n)
+        if length < 1e-12:  # 세 점이 한 줄 위에 있음
+            continue
+        n /= length
+        count = np.count_nonzero(np.abs(P @ n - a @ n) < dist)
+        if count > best_count:
+            best_count, best = count, (n, a @ n)
+    if best is None:
+        raise RuntimeError("평면을 찾지 못했다")
+    n, offset = best
+    inl = np.flatnonzero(np.abs(P @ n - offset) < dist)
+    center = P[inl].mean(axis=0)  # 평면 가까이 있는 점들로 평면을 다시 맞춘다 (최소제곱)
+    n = np.linalg.svd(P[inl] - center, full_matrices=False)[2][2]
+    return np.append(n, -n @ center), inl
+
+
 def level_floor(pcd, up="z", band=0.3, angle_tol=15.0, dist=0.02, sample=300_000, seed=0):
     """
-    바닥을 찾아 z = 0 수평면에 맞춘다. 결과 점군과 4x4 변환, 정보를 돌려준다.
+    바닥을 찾아 z = 0 수평면에 맞춘다. 결과 점군과 4x4 변환, 정보를 돌려준다. 같은 입력과 seed면 같은 결과가 나온다.
       1) up 축(예: 'z', '-y')이 +z가 되도록 대충 돌린다
       2) 가장 낮은 band [m] 높이 안의 점들에서 RANSAC으로 평면을 찾는다
       3) 그 평면의 법선이 +z에서 angle_tol 이내면 바닥으로 보고, 정확히 수평이 되게 돌린 뒤 z = 0으로 내린다
@@ -122,16 +148,16 @@ def level_floor(pcd, up="z", band=0.3, angle_tol=15.0, dist=0.02, sample=300_000
     rng = np.random.default_rng(seed)
     S = P[rng.choice(len(P), min(sample, len(P)), replace=False)]
     low = S[S[:, 2] < np.percentile(S[:, 2], 1) + band]
-    cand = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(low))
+    cand = low
 
     plane = None
-    for _ in range(3):  # 낮은 곳의 가장 큰 평면이 바닥이 아닐 수도 있으니 몇 번 시도
-        model, inl = cand.segment_plane(distance_threshold=dist, ransac_n=3, num_iterations=2000)
-        n = np.array(model[:3]) / np.linalg.norm(model[:3])
+    for attempt in range(3):  # 낮은 곳의 가장 큰 평면이 바닥이 아닐 수도 있으니 몇 번 시도
+        model, inl = ransac_plane(cand, dist, seed=seed + attempt)
+        n = model[:3]
         if abs(n[2]) > np.cos(np.deg2rad(angle_tol)):
-            plane = (n * np.sign(n[2]), model[3] * np.sign(n[2]) / np.linalg.norm(model[:3]), len(inl))
+            plane = (n * np.sign(n[2]), model[3] * np.sign(n[2]), len(inl))
             break
-        cand = cand.select_by_index(inl, invert=True)
+        cand = np.delete(cand, inl, axis=0)
     if plane is None:
         raise RuntimeError("바닥 평면을 찾지 못했다. up 축이 맞는지 확인하세요.")
     n, d, inliers = plane

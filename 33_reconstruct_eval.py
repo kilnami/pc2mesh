@@ -120,6 +120,7 @@ def main():
     parser.add_argument("--view", help="뷰어로 볼 결과 (표 맨 앞의 이름. 기본: 첫 번째 poisson_trim)")
     parser.add_argument("--no-view", action="store_true", help="3D 뷰어를 띄우지 않음")
     args = parser.parse_args()
+    o3d.utility.random.seed(0)   # 면 위에서 점을 뽑는 비교 계산이 무작위라서, 같은 입력이면 같은 숫자가 나오게 고정
 
     folder = DATA_DIR / args.name
     info = json.loads((folder / "inspect.json").read_text())

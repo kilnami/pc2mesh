@@ -356,6 +356,7 @@ def main():
                         help="타일마다 바닥 받침 상자(floor_support)를 넣는다. 기본은 뺀다: 받침 아랫면을 바닥으로 읽는 도구는 월드를 올려서 로봇이 못 걷는다")
     parser.add_argument("--texture-px", type=int, default=TEXTURE_PX, help=f"타일 텍스처 한 변 목표 [px] (기본 {TEXTURE_PX}). 전체 픽셀을 단일 파일과 맞추려면 4096 / 타일 수의 제곱근")
     args = parser.parse_args()
+    o3d.utility.random.seed(0)   # 면 위에서 점을 뽑는 계산이 무작위라서, 같은 입력이면 표와 삼각형 수 선택이 같게 고정
     m34.TEXTURE_MAX = args.texture_px
 
     folder = DATA_DIR / args.name
