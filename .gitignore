@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# 데이터: 원본 스캔과 중간·최종 결과물 (합쳐서 수 GB). 스크립트가 data/ 아래 폴더를 직접 만든다
+data/
+
+# 문서: 포럼 글 초안, 설명 그림, 업로드용 복사본 (git에 올리지 않는다)
+docs/
+
+# 라이선스가 걸린 데이터와 그 파생물 (NavVis 공장 샘플은 라이선스 미표기, Hall 101은 CC BY 4.0).
+# data/ 밖에 놓이거나 저장돼도 올라가지 않게 파일 형식으로도 막는다
+# 점군, 메시, 텍스처
+*.e57
+*.ply
+*.pcd
+*.pts
+*.xyz
+*.xyzn
+*.xyzrgb
+*.bin
+*.obj
+*.mtl
+*.glb
+*.gltf
+*.dae
+*.stl
+# 지도, 배열, 묶음 파일
+*.pgm
+*.npy
+*.npz
+*.zip
+# 렌더링 사진 (view.py --save 같은 것)
+*.png
+*.gif
+*.jpg
+*.jpeg
+
+# 자격증명과 도구 설정
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+.codex/
+.agents/
+
+# 에디터, OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 로그
+*.log
