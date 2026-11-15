@@ -214,6 +214,14 @@ def test_urdf_keeps_concave_on_collision(ws, export):
     assert re.search(r'<collision\b[^>]*concave="yes"', urdf), "<collision> 에 concave=\"yes\" 가 없다"
 
 
+def test_export_patches_floor_holes_in_collision_mesh(export):
+    """충돌용 바닥 구멍 12 % → 0.0 %. 칸 중심 한 점으로 재서 패치를 깐 칸은 거의 0 이 나온다 (그래서 아주 낮게만 본다)."""
+    before, after = (number(g) for g in grab(export, r"\[바닥 패치\] 충돌용 바닥 구멍 ([\d.]+)% → ([\d.]+)%", "바닥 패치").groups())
+    assert after <= 0.5, f"패치를 깔았는데도 바닥 구멍이 {after}% 남았다 (전 {before}%)"
+    unseen = number(grab(export, r"바닥 점이 없는 자리\(물체 밑 등\) ([\d.]+) ㎡ 메움", "못 본 바닥").group(1))
+    assert unseen >= 3, f"물체 밑 바닥을 {unseen} ㎡ 만 메웠다 (합성 방은 상자와 둥근 물체 밑 등 약 6.8 ㎡)"
+
+
 def test_pybullet_loads_the_collision_mesh(pybullet):
     """광선 일치 100 %, 60개 중 뚫고 빠진 공 3개 (합성 방은 책상 밑 같은 바닥 구멍이 있다)"""
     match = number(grab(pybullet, r"맞은 비율 ([\d.]+)%", "광선 일치율").group(1))
@@ -249,6 +257,15 @@ def test_tile_package_layout(ws, tiles):
         assert f"map_Kd texture_{name}.jpg" in mtl, "텍스처 이름이 타일마다 달라야 한다 (같으면 Gazebo가 섞어 쓴다)"
         assert (model / f"texture_{name}.jpg").stat().st_size > 0
         assert re.search(r"^vn ", (model / "collision.obj").read_text(), re.M), "충돌 OBJ 에 꼭짓점 법선(vn)이 없다"
+
+
+def test_tiles_patch_floor_holes_in_collision_mesh(tiles):
+    """타일마다 충돌용 바닥 구멍이 패치로 덮인다 (타일 경계에서 잘린 칸도 구멍으로 잡히므로 경계에서 자른 패치를 쓴다)."""
+    after = [number(g) for g in re.findall(r"\[바닥 패치\] 충돌용 바닥 구멍 [\d.]+% → ([\d.]+)%", tiles)]
+    assert len(after) == 2, f"타일 2개에서 바닥 패치 줄이 나와야 한다: {after}"
+    assert max(after) <= 0.5, f"타일 충돌 메시에 바닥 구멍이 남았다: {after}"
+    unseen = [number(g) for g in re.findall(r"바닥 점이 없는 자리\(물체 밑 등\) ([\d.]+) ㎡ 메움", tiles)]
+    assert sum(unseen) >= 3, f"타일에서 물체 밑 바닥을 {sum(unseen):.1f} ㎡ 만 메웠다 (합성 방은 약 6.8 ㎡): {unseen}"
 
 
 def test_tile_seams_are_closed(tiles):

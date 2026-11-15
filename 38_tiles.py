@@ -229,6 +229,21 @@ def clip_mesh(mesh, bounds):
     return out
 
 
+def tile_floor_patch(collision, P, bounds):
+    """타일 충돌 메시에 바닥 패치를 합친다 (34번의 floor_patch). (합친 메시, 패치 삼각형 수, 정보)를 돌려준다.
+    점은 타일 밖까지 전부 넘긴다: 물체 밑이 타일 경계에 걸쳐 있어도 범위 안인지(점으로 둘러싸였는지) 알아야 한다.
+    경계에 걸친 칸은 메시가 경계에서 잘려 있어 구멍으로 잡히므로, 패치는 경계에서 잘라 쓴다. 이웃 타일도 같은 선에서 자르므로 겹치지도 비지도 않는다."""
+    patch, info = m34.floor_patch(collision, P, bounds)
+    if patch is None:
+        return collision, 0, info
+    patch.vertex_colors = o3d.utility.Vector3dVector(np.zeros((len(patch.vertices), 3)))   # clip_mesh 가 색도 같이 자른다
+    patch = clip_mesh(patch, bounds)
+    patch.vertex_colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+    merged = o3d.geometry.TriangleMesh(collision)
+    merged += patch
+    return merged, len(patch.triangles), info
+
+
 def make_table(mesh_ext, bounds, P_floor, extra=()):
     """34번의 줄이기 표를 타일 단위로: [(자른 메시, 벗어난 거리 95% [m], 바닥 구멍, 표의 삼각형 수)]. 앞 행에서 이어서 줄인다.
     줄이기는 경계 바깥을 포함한 메시에, 표의 값은 경계에서 자른 메시로 센다.
@@ -352,6 +367,7 @@ def main():
     parser.add_argument("--out", help="출력 폴더 (기본: data/<이름>/tiles)")
     parser.add_argument("--visual-total", type=int, help="타일 전체의 보기용 삼각형 목표. 타일 면적에 비례해 나눈다 (예: 단일 파일과 같게 1000000)")
     parser.add_argument("--collision-total", type=int, help="타일 전체의 충돌용 삼각형 상한. 타일 면적에 비례해 나눈다 (예: 100000)")
+    parser.add_argument("--no-floor-patch", action="store_true", help="충돌용 메시의 바닥 구멍 패치를 넣지 않는다 (34번의 floor_patch)")
     parser.add_argument("--floor-support", action="store_true",
                         help="타일마다 바닥 받침 상자(floor_support)를 넣는다. 기본은 뺀다: 받침 아랫면을 바닥으로 읽는 도구는 월드를 올려서 로봇이 못 걷는다")
     parser.add_argument("--texture-px", type=int, default=TEXTURE_PX, help=f"타일 텍스처 한 변 목표 [px] (기본 {TEXTURE_PX}). 전체 픽셀을 단일 파일과 맞추려면 4096 / 타일 수의 제곱근")
@@ -407,6 +423,12 @@ def main():
         collision, c_ok = pick(rows, m34.COLLISION_TOL, 0, col_cap)
         print(f"[선택] 보기용 {len(visual.triangles):,}개 (최소 {vis_min:,}개 = {why}){'' if v_ok else ' (기준 5 mm를 못 맞춤: 예산 안에서 가장 큰 것)'}, "
               f"충돌용 {len(collision.triangles):,}개{'' if c_ok else ' (기준 2 cm를 못 맞춤: 예산 안에서 가장 큰 것)'}")
+        if not args.no_floor_patch:   # 고른 충돌용 메시에서 구멍을 다시 찾는다. 패치 삼각형은 예산(col_cap) 밖에 더해진다
+            before = m34.floor_hole_ratio(collision, P_floor)
+            collision, n_patch, info = tile_floor_patch(collision, P, b)
+            print(f"[바닥 패치] 충돌용 바닥 구멍 {before:.1%} → {m34.floor_hole_ratio(collision, P_floor):.1%}, "
+                  f"바닥 점이 없는 자리(물체 밑 등) {info['unseen'] * m34.FLOOR_CELL ** 2:.1f} ㎡ 메움 "
+                  f"(삼각형 +{n_patch:,}개 → {len(collision.triangles):,}개). 보기용에는 넣지 않는다")
 
         floor_z = floor_level(pts_tile) if args.floor_support else None
         if floor_z is None:

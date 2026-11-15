@@ -25,6 +25,13 @@
        충돌용: 벗어난 거리 95%가 COLLISION_TOL 이하이고 바닥 구멍이 HOLE_TOL 넘게 늘지 않는 가장 작은 수
        보기용: 벗어난 거리 95%가 VISUAL_TOL 이하인 가장 작은 수. 단 VISUAL_MIN 이상 (색은 꼭짓점에 실려 있어서
                너무 줄이면 모양보다 색이 먼저 뭉개진다)
+     충돌용에만: 줄인 뒤 바닥을 패치로 덮는다 (--no-floor-patch 로 끈다). 두 가지 칸을 덮는다.
+       구멍: 입력 점에 바닥이 있는데 메시가 없는 칸 (floor_hole_ratio 가 세는 칸)
+       못 본 바닥: 바닥 점이 아예 없지만 점(어느 높이든)으로 둘러싸인 범위 안인 칸. 물체 밑, 센서가 못 본 곳. 바닥이 평평하다고 보고
+         바닥이 보이는 곳에서 FILL_MAX 이내만 메운다. 물체를 따로 빼면 그 밑이 구멍이 되기 때문이다
+       칸마다 사각형을 깔고 높이는 멀쩡한 칸의 메시 바닥 높이를 안쪽으로 번지게 한다. 큰 빈 자리는 큰 정사각형 하나로 깐다.
+       바닥 점 높이는 안 쓴다 (벽 밑단·물체 아랫부분이 섞여 기존 바닥보다 최대 6 cm 높게 나왔다).
+       받침 상자와 달리 기존 바닥 높이에 두께 없는 면을 얹으므로 메시의 최저 높이가 바뀌지 않는다
   4) 색을 텍스처로 굽기: 꼭짓점 색은 obj 규격에 없어서 시뮬레이터가 무시한다 (Gazebo Fortress는 흰 그림자처럼,
      PyBullet은 흰색으로 그렸다). 그래서 텍스처 이미지에 삼각형마다 작은 정사각형 칸을 하나씩 주고, 칸의 반쪽
      (직각삼각형)에 세 꼭짓점 색을 섞어 칠한 뒤 obj + mtl + png 로 저장한다. 이 조합은 Gazebo, PyBullet, MuJoCo,
@@ -75,6 +82,10 @@ HOLE_TOL = 0.01            # 줄이면서 바닥 구멍 비율이 이만큼(1%p)
 N_SAMPLES = 200_000        # 벗어난 거리를 잴 때 정리한 메시 위에서 뽑을 점 수
 FLOOR_BAND = 0.05          # 바닥 구멍 검사: 이 높이 아래를 바닥으로 본다 [m]
 FLOOR_CELL = 0.05          # 바닥 구멍 검사 칸 크기 [m]
+PATCH_RING = 1             # 바닥 패치: 구멍 칸 둘레로 이만큼 칸을 더 깐다 (기존 면과 겹쳐서 틈을 없앤다)
+PATCH_BLOCKS = (8, 4)      # 바닥 패치: 큰 빈 자리는 이 칸 수의 정사각형으로 깐다 (삼각형 수를 줄인다)
+FILL_MAX = 2.0             # 바닥 점이 없는 칸(물체 밑)은 바닥이 보이는 곳에서 이 거리 안까지만 메운다 [m]
+FILL_ITER = int(FILL_MAX / FLOOR_CELL)
 TEXTURE_MAX = 4096         # 텍스처 이미지 한 변의 목표 최대 [px]. 삼각형 칸은 4~16 px (삼각형이 많으면 작아짐)
 
 
@@ -117,15 +128,166 @@ def open_edge_length(mesh):
     return float(np.linalg.norm(V[e[:, 0]] - V[e[:, 1]], axis=1).sum())
 
 
-def floor_hole_ratio(mesh, P):
-    """입력 점에 바닥이 있는 칸 중, 아래에서 쏜 광선이 바닥 높이에서 메시에 맞지 않는 칸의 비율."""
-    cells = np.unique(np.floor(P[P[:, 2] < FLOOR_BAND, :2] / FLOOR_CELL).astype(int), axis=0)
+def floor_cells(P):
+    """입력 점에 바닥(FLOOR_BAND 아래)이 있는 칸. 칸 정수 좌표 (N, 2)와 칸 안 바닥 점 높이의 중앙값 (N,)을 돌려준다."""
+    low = P[P[:, 2] < FLOOR_BAND]
+    cells, inv = np.unique(np.floor(low[:, :2] / FLOOR_CELL).astype(int), axis=0, return_inverse=True)
+    inv = inv.ravel()
+    order = np.lexsort((low[:, 2], inv))             # 칸별로 모으고 칸 안에서는 높이순
+    start = np.concatenate([[0], np.cumsum(np.bincount(inv))[:-1]])
+    mid = start + np.bincount(inv) // 2
+    return cells, low[order, 2][mid]
+
+
+def floor_hit_z(mesh, cells):
+    """칸 중심에서 아래로부터 쏜 광선이 메시에 처음 맞는 높이. 못 맞으면 inf."""
     xy = (cells + 0.5) * FLOOR_CELL
     rays = np.c_[xy, np.full(len(xy), -0.5), np.zeros((len(xy), 2)), np.ones(len(xy))].astype(np.float32)
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
-    hit_z = -0.5 + scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()  # 못 맞으면 inf
-    return float(np.mean(np.abs(hit_z) > FLOOR_BAND))
+    return -0.5 + scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+
+
+def floor_hole_ratio(mesh, P):
+    """입력 점에 바닥이 있는 칸 중, 아래에서 쏜 광선이 바닥 높이에서 메시에 맞지 않는 칸의 비율."""
+    return float(np.mean(np.abs(floor_hit_z(mesh, floor_cells(P)[0])) > FLOOR_BAND))
+
+
+def unseen_floor_cells(P, seen):
+    """점(어느 높이든)으로 둘러싸인 범위 안인데 바닥 점이 없는 칸 (물체 밑, 센서가 못 본 바닥). 칸 정수 좌표 (M, 2).
+    점이 하나라도 있는 칸을 벽으로 보고, 격자 가장자리(점이 없는 여백)에서 4방향으로 번지는 빈 칸을 바깥으로 센다.
+    바깥에 닿지 않는 빈 칸이 안쪽이다. 지붕·천장이 스캔돼 있으면 방 전체가 점으로 덮여서 안쪽이 곧 방 안이다.
+    seen: floor_cells 가 돌려준 칸 (바닥 점이 있는 칸은 뺀다)."""
+    ij = np.floor(P[:, :2] / FLOOR_CELL).astype(int)
+    lo = ij.min(axis=0) - 1
+    ij -= lo
+    shape = ij.max(axis=0) + 2                        # 가장자리 한 칸은 늘 점이 없는 여백
+    occupied = np.zeros(shape, bool)
+    occupied[ij[:, 0], ij[:, 1]] = True
+    outside = np.zeros(shape, bool)
+    outside[[0, -1], :] = True
+    outside[:, [0, -1]] = True
+    while True:
+        grown = outside.copy()
+        grown[1:] |= outside[:-1]
+        grown[:-1] |= outside[1:]
+        grown[:, 1:] |= outside[:, :-1]
+        grown[:, :-1] |= outside[:, 1:]
+        grown &= ~occupied
+        if (grown == outside).all():
+            break
+        outside = grown
+    inside = ~outside
+    inside[seen[:, 0] - lo[0], seen[:, 1] - lo[1]] = False
+    return np.argwhere(inside) + lo
+
+
+def full_blocks(mask, s, lo):
+    """mask 에서 s x s 칸이 모두 True 인 정사각형의 왼쪽 아래 칸 (a, b). 칸 번호가 s 의 배수인 자리에서만 잡는다 (이웃 타일과 경계가 맞게)."""
+    nx, ny = mask.shape
+    I = np.zeros((nx + 1, ny + 1), int)
+    I[1:, 1:] = mask.cumsum(0).cumsum(1)
+    a = np.arange(0, nx - s + 1)
+    b = np.arange(0, ny - s + 1)
+    a, b = a[(lo[0] + a) % s == 0], b[(lo[1] + b) % s == 0]
+    n = I[a[:, None] + s, b[None, :] + s] - I[a[:, None], b[None, :] + s] - I[a[:, None] + s, b[None, :]] + I[a[:, None], b[None, :]]
+    ia, ib = np.nonzero(n == s * s)
+    return np.c_[a[ia], b[ib]]
+
+
+def floor_patch(mesh, P, bounds=None):
+    """바닥을 덮는 패치 메시와 정보 {holes, unseen}를 돌려준다. 메시에 합치지는 않는다. 덮을 게 없으면 패치는 None.
+    덮는 칸 두 가지 (칸 = FLOOR_CELL):
+      구멍: 입력 점에 바닥이 있는데 메시가 없는 칸 (floor_hole_ratio 가 세는 칸)
+      못 본 바닥: 바닥 점이 아예 없는데 점으로 둘러싸인 범위 안인 칸 (물체 밑 등. unseen_floor_cells).
+                  바닥이 보이는 곳에서 FILL_MAX 이내만. 바닥이 평평하다고 보고 주변 높이를 이어 깐다
+    구멍 칸과 못 본 칸의 둘레 PATCH_RING 칸 중 바닥 점이 있는 칸까지 같이 깐다.
+    둘레까지 까는 이유: 구멍 판정은 칸 중심 한 점이라서 실제 구멍 가장자리는 칸 경계와 안 맞는다. 멀쩡한 면과 겹쳐 틈이 안 남게 한다.
+    높이: 멀쩡한 칸에서 잰 메시 바닥 높이를 안쪽으로 번지게 한다 (칸 모서리마다 둘레 네 칸의 평균, 빈 모서리는 이웃 모서리에서 한 겹씩 채움).
+    입력 점 높이는 쓰지 않는다: 바닥 점에 벽 밑단과 물체 아랫부분이 섞여 있어서 기존 바닥보다 최대 6 cm 높게 나왔다 (합성 방).
+    삼각형 수: 큰 빈 자리는 PATCH_BLOCKS 칸 정사각형 하나(삼각형 2장)로, 나머지는 칸마다 깐다.
+    bounds [x0, y0, x1, y1] 를 주면 그 안(과 한 칸 바깥)의 칸만 본다 (타일: 메시가 경계에서 잘려 있어서 그 밖은 구멍으로 잘못 잡힌다)."""
+    r = PATCH_RING
+    cells, _ = floor_cells(P)
+    unseen = unseen_floor_cells(P, cells)
+
+    def in_region(c):
+        if bounds is None:
+            return np.ones(len(c), bool)
+        xy = (c + 0.5) * FLOOR_CELL
+        return ((xy[:, 0] >= bounds[0] - FLOOR_CELL) & (xy[:, 0] <= bounds[2] + FLOOR_CELL) &
+                (xy[:, 1] >= bounds[1] - FLOOR_CELL) & (xy[:, 1] <= bounds[3] + FLOOR_CELL))
+    cells, unseen = cells[in_region(cells)], unseen[in_region(unseen)]
+    hit = floor_hit_z(mesh, cells)
+    hole = np.abs(hit) > FLOOR_BAND
+    if not hole.any() and len(unseen) == 0:
+        return None, dict(holes=0, unseen=0)
+    both = np.vstack([cells, unseen])
+    lo = both.min(axis=0)
+    nx, ny = both.max(axis=0) - lo + 1
+    shape = (nx + 2 * r, ny + 2 * r)                  # 둘레 r 칸 여백
+    at = lambda c: (c[:, 0] - lo[0] + r, c[:, 1] - lo[1] + r)
+    seen_mask, unseen_mask, cover = (np.zeros(shape, bool) for _ in range(3))
+    seen_mask[at(cells)] = True
+    unseen_mask[at(unseen)] = True
+    cover[at(cells[hole])] = True
+    cover[at(unseen)] = True
+    H = np.full(shape, np.nan)                        # 메시가 바닥을 덮고 있는 칸의 바닥 높이 (구멍·못 본 칸은 NaN)
+    H[at(cells[~hole])] = hit[~hole]
+    grown = cover.copy()
+    for dx in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            grown[r + dx:r + dx + nx, r + dy:r + dy + ny] |= cover[r:r + nx, r:r + ny]
+    grown &= seen_mask | unseen_mask                  # 점이 없고 범위 밖인 칸(건물 밖)은 깔지 않는다
+
+    known = ~np.isnan(H)
+    S, N = np.where(known, H, 0.0), known.astype(float)
+    corner = lambda A: A[:-1, :-1] + A[1:, :-1] + A[:-1, 1:] + A[1:, 1:]   # 모서리 둘레 네 칸의 합
+    cz = np.where(corner(N) > 0, corner(S) / np.maximum(corner(N), 1), np.nan)[r - 1:r + nx, r - 1:r + ny]   # (nx + 1, ny + 1), 칸 (i, j) 의 왼쪽 아래 모서리 = (i, j)
+    for _ in range(FILL_ITER):                        # 높이를 모르는 모서리는 이웃 모서리 평균으로 한 겹씩 채운다
+        pad = np.pad(cz, 1, constant_values=np.nan)
+        near = np.stack([pad[1 + dx:pad.shape[0] - 1 + dx, 1 + dy:pad.shape[1] - 1 + dy]
+                         for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx, dy) != (0, 0)])
+        ok = ~np.isnan(near)
+        new = np.isnan(cz) & ok.any(axis=0)
+        if not new.any():
+            break
+        cz = np.where(new, np.where(ok, near, 0.0).sum(axis=0) / np.maximum(ok.sum(axis=0), 1), cz)
+    good = ~np.isnan(cz)
+    inner = grown[r:r + nx, r:r + ny] & good[:-1, :-1] & good[1:, :-1] & good[:-1, 1:] & good[1:, 1:]   # 네 모서리 높이를 아는 칸만
+    info = dict(holes=int(hole.sum()), unseen=int((inner & unseen_mask[r:r + nx, r:r + ny]).sum()))
+    if not inner.any():
+        return None, info
+
+    quads, left = [], inner.copy()
+    for s in PATCH_BLOCKS:                            # 큰 정사각형부터 깔고 남은 칸은 칸마다
+        blocks = full_blocks(left, s, lo)
+        for a, b in blocks:
+            left[a:a + s, b:b + s] = False
+        quads.append((blocks, s))
+    quads.append((np.argwhere(left), 1))
+    origin = np.vstack([q for q, _ in quads])
+    size = np.concatenate([np.full(len(q), s) for q, s in quads])
+    corners = origin[:, None, :] + size[:, None, None] * np.array([[0, 0], [1, 0], [1, 1], [0, 1]])   # 위에서 보아 반시계
+    flat = corners[..., 0] * (ny + 1) + corners[..., 1]
+    used, quad = np.unique(flat, return_inverse=True)
+    quad = quad.reshape(-1, 4)
+    ca, cb = used // (ny + 1), used % (ny + 1)
+    V = np.c_[(lo[0] + ca) * FLOOR_CELL, (lo[1] + cb) * FLOOR_CELL, cz[ca, cb]]
+    patch = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(V),
+                                      o3d.utility.Vector3iVector(np.vstack([quad[:, [0, 1, 2]], quad[:, [0, 2, 3]]])))
+    patch.compute_vertex_normals()
+    return patch, info
+
+
+def add_floor_patch(collision, P, bounds=None):
+    """충돌용 메시에 바닥 패치를 합친다. (합친 메시, 패치 삼각형 수, floor_patch 의 정보)를 돌려준다. 덮을 곳이 없으면 그대로."""
+    patch, info = floor_patch(collision, P, bounds)
+    if patch is None:
+        return collision, 0, info
+    merged = o3d.geometry.TriangleMesh(collision)
+    merged += patch
+    return merged, len(patch.triangles), info
 
 
 def decimate(mesh, n):
@@ -257,6 +419,7 @@ def main():
                         help="재구성 방법 (기본: Poisson trim. 구멍이 적어 충돌용에 안전)")
     parser.add_argument("--visual", type=int, help="보기용 목표 삼각형 수 (기본: 표에서 VISUAL_TOL 기준으로 고름)")
     parser.add_argument("--collision", type=int, help="충돌용 목표 삼각형 수 (기본: 표에서 COLLISION_TOL 기준으로 고름)")
+    parser.add_argument("--no-floor-patch", action="store_true", help="충돌용 메시의 바닥 구멍 패치를 넣지 않는다")
     parser.add_argument("--gt", help="정답 점 파일 (있으면 줄일 때마다 33번과 같은 정확도·완성도를 잼)")
     parser.add_argument("--view", choices=["collision", "visual"], default="collision", help="뷰어로 볼 메시")
     parser.add_argument("--no-view", action="store_true", help="3D 뷰어를 띄우지 않음")
@@ -317,6 +480,12 @@ def main():
           f"({'직접 지정' if args.visual else f'벗어난 거리 95% ≤ {VISUAL_TOL * 1000:.0f} mm, {VISUAL_MIN:,}개 이상'}), "
           f"충돌용 {len(collision.triangles):,}개 "
           f"({'직접 지정' if args.collision else f'≤ {COLLISION_TOL * 100:.0f} cm, 바닥 구멍 +{HOLE_TOL:.0%}p 이내'})")
+    if not args.no_floor_patch:   # 줄인 뒤의 충돌용 메시에서 구멍을 다시 찾는다 (줄이면서 생긴 구멍도 덮는다)
+        before = floor_hole_ratio(collision, P)
+        collision, n_patch, info = add_floor_patch(collision, P)
+        print(f"[바닥 패치] 충돌용 바닥 구멍 {before:.1%} → {floor_hole_ratio(collision, P):.1%}, "
+              f"바닥 점이 없는 자리(물체 밑 등) {info['unseen'] * FLOOR_CELL ** 2:.1f} ㎡ 메움 "
+              f"(삼각형 +{n_patch:,}개 → {len(collision.triangles):,}개). 보기용에는 넣지 않는다")
 
     # 4) 색을 텍스처로 굽기
     textured = None
