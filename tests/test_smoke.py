@@ -222,6 +222,14 @@ def test_export_patches_floor_holes_in_collision_mesh(export):
     assert unseen >= 3, f"물체 밑 바닥을 {unseen} ㎡ 만 메웠다 (합성 방은 상자와 둥근 물체 밑 등 약 6.8 ㎡)"
 
 
+def test_export_adds_wall_skirt_to_both_meshes(export):
+    """합성 방에서 벽 4장을 찾고, 바닥에서 떠 있는 열 10개(폭 1 m)를 바닥까지 채운다. 라이다가 보기용을 보므로 충돌용·보기용 둘 다에 넣는다."""
+    m = grab(export, r"\[벽 치마\] 벽 (\d+)장에서 바닥에서 떠 있는 열 (\d+)개", "벽 치마")
+    walls, columns = number(m.group(1)), number(m.group(2))
+    assert walls == 4, f"합성 방의 벽은 4장이다: {walls:.0f}장을 찾았다"
+    assert columns >= 3, f"떠 있는 벽 열을 {columns:.0f}개만 채웠다 (합성 방은 약 10개)"
+
+
 def test_pybullet_loads_the_collision_mesh(pybullet):
     """광선 일치 100 %, 60개 중 뚫고 빠진 공 3개 (합성 방은 책상 밑 같은 바닥 구멍이 있다)"""
     match = number(grab(pybullet, r"맞은 비율 ([\d.]+)%", "광선 일치율").group(1))
@@ -266,6 +274,14 @@ def test_tiles_patch_floor_holes_in_collision_mesh(tiles):
     assert max(after) <= 0.5, f"타일 충돌 메시에 바닥 구멍이 남았다: {after}"
     unseen = [number(g) for g in re.findall(r"바닥 점이 없는 자리\(물체 밑 등\) ([\d.]+) ㎡ 메움", tiles)]
     assert sum(unseen) >= 3, f"타일에서 물체 밑 바닥을 {sum(unseen):.1f} ㎡ 만 메웠다 (합성 방은 약 6.8 ㎡): {unseen}"
+
+
+def test_tiles_add_wall_skirt(tiles):
+    """벽은 점 전체에서 한 번 찾고(4장), 타일마다 치마를 넣는다. 타일 경계에서 잘라 쓴다."""
+    walls = number(grab(tiles, r"\[벽\] 큰 수직 벽 평면 (\d+)장", "벽 찾기").group(1))
+    assert walls == 4, f"합성 방의 벽은 4장이다: {walls:.0f}장"
+    columns = [number(g) for g in re.findall(r"\[벽 치마\] 바닥에서 떠 있는 열 (\d+)개", tiles)]
+    assert len(columns) == 2 and sum(columns) >= 3, f"타일 2개에서 치마 줄이 나와야 하고 열이 있어야 한다: {columns}"
 
 
 def test_tile_seams_are_closed(tiles):

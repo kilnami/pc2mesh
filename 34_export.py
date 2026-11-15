@@ -32,6 +32,11 @@
        칸마다 사각형을 깔고 높이는 멀쩡한 칸의 메시 바닥 높이를 안쪽으로 번지게 한다. 큰 빈 자리는 큰 정사각형 하나로 깐다.
        바닥 점 높이는 안 쓴다 (벽 밑단·물체 아랫부분이 섞여 기존 바닥보다 최대 6 cm 높게 나왔다).
        받침 상자와 달리 기존 바닥 높이에 두께 없는 면을 얹으므로 메시의 최저 높이가 바뀌지 않는다
+     충돌용·보기용 둘 다: 벽 치마 (--no-wall-skirt 로 끈다). 벽은 바닥까지 이어져 있는 게 당연한데, 스캔은 기계·팔레트 뒤의 벽 밑을 못 본다
+       (공장 동쪽 벽은 원본에서도 밑단 칸의 33%에 점이 없다). 점군에서 큰 수직 벽 평면을 찾고(find_walls) 벽을 10 cm 칸으로 펼쳐서, 열마다
+       벽이 처음 나오는 높이가 바닥에서 떠 있으면 그 사이를 바닥(z = 0)까지 얇은 면으로 채운다. 떠 있는 높이가 SKIRT_MAX(1 m)를 넘는 열은
+       문 같은 열린 곳으로 보고 두고, 처음 나온 벽 위로 SKIRT_MIN_RUN 칸이 이어져야 벽으로 본다. 보기용에는 벽 가장자리 색을 입힌다
+       (라이다는 충돌용이 아니라 보기용을 본다)
   4) 색을 텍스처로 굽기: 꼭짓점 색은 obj 규격에 없어서 시뮬레이터가 무시한다 (Gazebo Fortress는 흰 그림자처럼,
      PyBullet은 흰색으로 그렸다). 그래서 텍스처 이미지에 삼각형마다 작은 정사각형 칸을 하나씩 주고, 칸의 반쪽
      (직각삼각형)에 세 꼭짓점 색을 섞어 칠한 뒤 obj + mtl + png 로 저장한다. 이 조합은 Gazebo, PyBullet, MuJoCo,
@@ -86,6 +91,13 @@ PATCH_RING = 1             # 바닥 패치: 구멍 칸 둘레로 이만큼 칸�
 PATCH_BLOCKS = (8, 4)      # 바닥 패치: 큰 빈 자리는 이 칸 수의 정사각형으로 깐다 (삼각형 수를 줄인다)
 FILL_MAX = 2.0             # 바닥 점이 없는 칸(물체 밑)은 바닥이 보이는 곳에서 이 거리 안까지만 메운다 [m]
 FILL_ITER = int(FILL_MAX / FLOOR_CELL)
+WALL_BAND = 0.06           # 벽 치마: 벽 평면에서 이 안의 점을 벽 점으로 본다 [m]
+WALL_MIN_POINTS = 5000     # 벽 치마: 평면 하나로 인정하는 벽 점 수 (바닥 위 0.3~2 m, 법선이 수평)
+WALL_MIN_WIDTH = 3.0       # 벽 치마: 평면의 폭이 이 이상이어야 벽으로 본다 [m]
+WALL_MIN_FILL = 0.5        # 벽 치마: 벽 범위(폭 x 바닥 위 0.3~2 m)를 10 cm 칸으로 나눴을 때 점이 있는 칸이 이 비율 이상이어야 벽으로 본다
+WALL_CELL = 0.10           # 벽 치마: 벽을 펼친 칸 크기 [m]
+SKIRT_MAX = 1.0            # 벽 치마: 벽이 처음 나오는 높이가 이 이하일 때만 바닥까지 내린다 [m]. 더 높이 떠 있으면 문 같은 열린 곳으로 보고 둔다
+SKIRT_MIN_RUN = 3          # 벽 치마: 처음 나온 벽 위로 이만큼(칸) 이어져야 벽으로 본다 (떨어진 조각 하나는 벽이 아니다)
 TEXTURE_MAX = 4096         # 텍스처 이미지 한 변의 목표 최대 [px]. 삼각형 칸은 4~16 px (삼각형이 많으면 작아짐)
 
 
@@ -290,6 +302,143 @@ def add_floor_patch(collision, P, bounds=None):
     return merged, len(patch.triangles), info
 
 
+def find_walls(P, N):
+    """점군에서 큰 수직 벽 평면을 찾는다: [{n, t, d, inward, u0, u1, top}].
+    벽 점 = 법선이 거의 수평이고 바닥 위 0.3~2 m. 법선 방향의 가장 많은 쪽과 거기에 직교하는 쪽(직각 건물 가정)에서,
+    평면까지의 거리를 2 cm 칸으로 세어 점이 몰린 곳(WALL_MIN_POINTS 이상)을 평면으로 본다. 폭이 WALL_MIN_WIDTH 이상이고, 벽 범위 중 점이 있는 칸이
+    WALL_MIN_FILL 이상이어야 한다 (진짜 벽은 62~100%, 인천 지하철 역사의 기둥 줄과 공장의 기계 면은 9~29%였다).
+    n: 법선(xy), t: 벽을 따라가는 방향, d: P·n 의 값, inward: 방 안쪽을 가리키는 부호, u0~u1: 벽의 범위, top: 벽 높이."""
+    h = (np.abs(N[:, 2]) < 0.25) & (P[:, 2] > 0.3) & (P[:, 2] < 2.0)
+    if h.sum() < WALL_MIN_POINTS:
+        return []
+    ang = np.degrees(np.arctan2(N[h, 1], N[h, 0])) % 180
+    hist, _ = np.histogram(ang, bins=180, range=(0, 180))
+    smooth = sum(np.roll(hist, k) for k in range(-2, 3))     # 0도와 180도는 같은 방향이라 원형으로 합친다
+    a0 = float(np.argmax(smooth)) + 0.5
+    walls = []
+    for a in (a0, (a0 + 90) % 180):
+        n = np.array([np.cos(np.radians(a)), np.sin(np.radians(a))])
+        t = np.array([-n[1], n[0]])
+        da = np.abs(((np.degrees(np.arctan2(N[:, 1], N[:, 0])) - a + 90) % 180) - 90)
+        dist = P[h & (da < 8), :2] @ n
+        if len(dist) < WALL_MIN_POINTS:
+            continue
+        counts, edges = np.histogram(dist, bins=np.arange(dist.min(), dist.max() + 0.02, 0.02))
+        smooth = np.convolve(counts, np.ones(3), "same")
+        peaks = []
+        for i in np.argsort(smooth)[::-1]:
+            if smooth[i] < WALL_MIN_POINTS:
+                break
+            c = (edges[i] + edges[i + 1]) / 2
+            if all(abs(c - q) > 0.3 for q in peaks):
+                peaks.append(c)
+        for c in peaks:
+            near = np.abs(P[:, :2] @ n - c) < WALL_BAND
+            u, z = P[near, :2] @ t, P[near, 2]
+            u0, u1, top = np.percentile(u, 0.5), np.percentile(u, 99.5), np.percentile(z, 99)
+            if u1 - u0 < WALL_MIN_WIDTH or top < 1.5:
+                continue
+            nu, nv = int((u1 - u0) / WALL_CELL) + 1, int(1.7 / WALL_CELL)       # 벽 범위 중 점이 있는 칸의 비율: 같은 평면에 늘어선 기둥·기계 면은 듬성듬성하다
+            filled = np.zeros((nu, nv), bool)
+            iu, iv = ((u - u0) / WALL_CELL).astype(int), ((z - 0.3) / WALL_CELL).astype(int)
+            ok = (iu >= 0) & (iu < nu) & (iv >= 0) & (iv < nv)
+            filled[iu[ok], iv[ok]] = True
+            if filled.mean() < WALL_MIN_FILL:
+                continue
+            d = float(np.mean(P[near, :2] @ n))
+            inward = 1.0 if (P[:, :2].mean(axis=0) - d * n) @ n >= 0 else -1.0
+            walls.append(dict(n=n, t=t, d=d, inward=inward, u0=float(u0), u1=float(u1), top=float(min(top, 4.0))))
+    return walls
+
+
+def wall_skirt(mesh, walls):
+    """벽 밑이 떠 있는 곳을 바닥(z = 0)까지 내리는 얇은 면 (치마)과 정보 {columns, length, refused}를 돌려준다. 없으면 치마는 None.
+    벽을 WALL_CELL 칸으로 펼쳐서, 평면 안쪽 15 cm에서 벽 쪽으로 광선을 쏴 메시가 벽 부근(-12~+10 cm)에 있는 칸을 찾는다.
+    열마다 처음 나오는 칸(아래에서부터)이 바닥에서 떠 있고, 그 위로 SKIRT_MIN_RUN 칸 이어지고, 떠 있는 높이가 SKIRT_MAX 이하이면
+    그 열을 바닥까지 채운다. 더 높이 떠 있는 열은 문 같은 열린 곳일 수 있어 두고 refused 로 센다.
+    치마의 위치는 그 열에서 처음 나온 벽의 실제 위치를 따르고, 이웃한 열과 가장자리를 같이 쓴다 (틈 없이 이어짐)."""
+    sc = o3d.t.geometry.RaycastingScene()
+    sc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+    V, T = [], []
+    cols = refused = 0
+    length = 0.0
+    for w in walls:
+        n, t, d, inward = w["n"], w["t"], w["d"], w["inward"]
+        us = np.arange(w["u0"], w["u1"], WALL_CELL) + WALL_CELL / 2
+        vs = np.arange(0.0, w["top"], WALL_CELL) + WALL_CELL / 2
+        U, Vv = np.meshgrid(us, vs, indexing="ij")
+        xy = (d * n)[None, :] + inward * 0.15 * n[None, :] + (U.reshape(-1, 1) - (d * n) @ t) * t[None, :]
+        rays = np.c_[xy, Vv.reshape(-1), np.tile(-inward * n, (U.size, 1)), np.zeros(U.size)].astype(np.float32)
+        th = sc.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy().reshape(U.shape)
+        cover = np.isfinite(th) & (th > 0.03) & (th < 0.25)
+        info_col = {}                                           # 열 번호 -> (벽 위치 offset, 치마 위 높이)
+        for k in range(len(us)):
+            idx = np.flatnonzero(cover[k])
+            if len(idx) == 0 or idx[0] == 0:                    # 벽이 없거나 바닥에서 이미 시작
+                continue
+            i0 = int(idx[0])
+            if not cover[k, i0:i0 + SKIRT_MIN_RUN].all():
+                continue
+            if i0 * WALL_CELL > SKIRT_MAX:
+                refused += 1
+                continue
+            info_col[k] = (d + inward * (0.15 - th[k, i0]), i0 * WALL_CELL + WALL_CELL / 2)   # 치마 윗면은 벽 안으로 반 칸 겹친다
+        for k, (off, top) in info_col.items():
+            def edge(j):                                        # 열 경계 위치: 이웃 치마 열이 있으면 평균
+                offs = [info_col[q][0] for q in (j - 1, j) if q in info_col]
+                return float(np.mean(offs))
+            pts = []
+            for j, z in ((k, 0.0), (k + 1, 0.0), (k + 1, top), (k, top)):
+                u = w["u0"] + j * WALL_CELL
+                xyz = edge(j) * n + u * t
+                pts.append([xyz[0], xyz[1], z])
+            base = len(V)
+            V.extend(pts)
+            quad = [0, 1, 2, 3] if inward > 0 else [1, 0, 3, 2]
+            T.extend([[base + quad[0], base + quad[1], base + quad[2]], [base + quad[0], base + quad[2], base + quad[3]]])
+            cols += 1
+            length += WALL_CELL
+    info = dict(columns=cols, length=length, refused=refused, walls=len(walls))
+    if not V:
+        return None, info
+    skirt = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(np.array(V)), o3d.utility.Vector3iVector(np.array(T)))
+    skirt.compute_vertex_normals()
+    return skirt, info
+
+
+def color_skirt(skirt, visual):
+    """치마 꼭짓점에 보기용 메시의 벽 색을 입힌다. 치마는 열마다 꼭짓점 4개(왼쪽 아래, 오른쪽 아래, 오른쪽 위, 왼쪽 위)씩 이어져 있다.
+    위쪽 꼭짓점(벽 안으로 반 칸 들어간 자리)에서 가장 가까운 보기용 꼭짓점의 색을 쓰고, 아래쪽 꼭짓점은 같은 열 위쪽 것을 따라간다
+    (바닥 가까이에서 찾으면 바닥 색이 묻는다)."""
+    V = np.asarray(skirt.vertices).reshape(-1, 4, 3)
+    tree = o3d.geometry.KDTreeFlann(o3d.geometry.PointCloud(visual.vertices))
+    vc = np.asarray(visual.vertex_colors)
+    colors = np.zeros((len(V), 4, 3))
+    for i, quad in enumerate(V):
+        for j in (2, 3):
+            colors[i, j] = vc[tree.search_knn_vector_3d(quad[j], 1)[1][0]]
+        colors[i, 0], colors[i, 1] = colors[i, 3], colors[i, 2]
+    skirt.vertex_colors = o3d.utility.Vector3dVector(colors.reshape(-1, 3))
+    return skirt
+
+
+def add_wall_skirt(collision, walls, visual=None):
+    """충돌용 메시에 벽 치마를 합친다. visual 을 주면 같은 치마에 벽 색을 입혀 보기용에도 합친다.
+    (합친 충돌용, 합친 보기용 또는 None, 치마 삼각형 수, wall_skirt 의 정보)를 돌려준다. 메울 곳이 없으면 그대로.
+    라이다는 충돌용이 아니라 보기용 메시를 본다고 알고 있어서, 라이다에도 벽이 보이려면 보기용에도 필요하다."""
+    skirt, info = wall_skirt(collision, walls)
+    if skirt is None:
+        return collision, visual, 0, info
+    merged = o3d.geometry.TriangleMesh(collision)
+    merged += skirt
+    vis = None
+    if visual is not None:
+        colored = color_skirt(o3d.geometry.TriangleMesh(skirt), visual)
+        vis = o3d.geometry.TriangleMesh(visual)
+        vis += colored
+    return merged, vis, len(skirt.triangles), info
+
+
 def decimate(mesh, n):
     if len(mesh.triangles) <= n:
         return o3d.geometry.TriangleMesh(mesh)
@@ -420,6 +569,7 @@ def main():
     parser.add_argument("--visual", type=int, help="보기용 목표 삼각형 수 (기본: 표에서 VISUAL_TOL 기준으로 고름)")
     parser.add_argument("--collision", type=int, help="충돌용 목표 삼각형 수 (기본: 표에서 COLLISION_TOL 기준으로 고름)")
     parser.add_argument("--no-floor-patch", action="store_true", help="충돌용 메시의 바닥 구멍 패치를 넣지 않는다")
+    parser.add_argument("--no-wall-skirt", action="store_true", help="벽 밑을 바닥까지 내리는 벽 치마를 넣지 않는다")
     parser.add_argument("--gt", help="정답 점 파일 (있으면 줄일 때마다 33번과 같은 정확도·완성도를 잼)")
     parser.add_argument("--view", choices=["collision", "visual"], default="collision", help="뷰어로 볼 메시")
     parser.add_argument("--no-view", action="store_true", help="3D 뷰어를 띄우지 않음")
@@ -486,6 +636,11 @@ def main():
         print(f"[바닥 패치] 충돌용 바닥 구멍 {before:.1%} → {floor_hole_ratio(collision, P):.1%}, "
               f"바닥 점이 없는 자리(물체 밑 등) {info['unseen'] * FLOOR_CELL ** 2:.1f} ㎡ 메움 "
               f"(삼각형 +{n_patch:,}개 → {len(collision.triangles):,}개). 보기용에는 넣지 않는다")
+    if not args.no_wall_skirt:   # 벽 밑이 떠 있는 곳을 바닥까지 내린다. 충돌용과 보기용 둘 다 (라이다는 보기용을 본다)
+        walls = find_walls(P, np.asarray(pcd.normals))
+        collision, visual, n_skirt, winfo = add_wall_skirt(collision, walls, visual if visual.has_vertex_colors() else None)
+        print(f"[벽 치마] 벽 {winfo['walls']}장에서 바닥에서 떠 있는 열 {winfo['columns']}개 (폭 {winfo['length']:.1f} m)를 바닥까지 채움, "
+              f"{SKIRT_MAX:g} m 넘게 떠서 둔 열 {winfo['refused']}개 (문 같은 열린 곳). 삼각형 +{n_skirt:,}개 (충돌용·보기용 각각)")
 
     # 4) 색을 텍스처로 굽기
     textured = None

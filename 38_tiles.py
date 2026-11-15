@@ -244,6 +244,23 @@ def tile_floor_patch(collision, P, bounds):
     return merged, len(patch.triangles), info
 
 
+def tile_wall_skirt(collision, visual, walls, bounds):
+    """타일의 충돌용·보기용 메시에 벽 치마를 합친다 (34번의 wall_skirt). (충돌용, 보기용, 치마 삼각형 수, 정보)를 돌려준다.
+    치마는 이 타일의 충돌 메시에서 구해서, 타일 경계에서 자른다 (이웃 타일도 같은 선에서 자른다). 보기용에는 벽 색을 입힌다."""
+    skirt, info = m34.wall_skirt(collision, walls)
+    if skirt is None:
+        return collision, visual, 0, info
+    colored = m34.color_skirt(o3d.geometry.TriangleMesh(skirt), visual)        # 자르기 전에 (꼭짓점 4개씩 묶음이 필요하다)
+    skirt.vertex_colors = o3d.utility.Vector3dVector(np.zeros((len(skirt.vertices), 3)))
+    sk_col, sk_vis = clip_mesh(skirt, bounds), clip_mesh(colored, bounds)
+    sk_col.vertex_colors = o3d.utility.Vector3dVector(np.zeros((0, 3)))
+    collision = o3d.geometry.TriangleMesh(collision)
+    collision += sk_col
+    visual = o3d.geometry.TriangleMesh(visual)
+    visual += sk_vis
+    return collision, visual, len(sk_col.triangles), info
+
+
 def make_table(mesh_ext, bounds, P_floor, extra=()):
     """34번의 줄이기 표를 타일 단위로: [(자른 메시, 벗어난 거리 95% [m], 바닥 구멍, 표의 삼각형 수)]. 앞 행에서 이어서 줄인다.
     줄이기는 경계 바깥을 포함한 메시에, 표의 값은 경계에서 자른 메시로 센다.
@@ -368,6 +385,7 @@ def main():
     parser.add_argument("--visual-total", type=int, help="타일 전체의 보기용 삼각형 목표. 타일 면적에 비례해 나눈다 (예: 단일 파일과 같게 1000000)")
     parser.add_argument("--collision-total", type=int, help="타일 전체의 충돌용 삼각형 상한. 타일 면적에 비례해 나눈다 (예: 100000)")
     parser.add_argument("--no-floor-patch", action="store_true", help="충돌용 메시의 바닥 구멍 패치를 넣지 않는다 (34번의 floor_patch)")
+    parser.add_argument("--no-wall-skirt", action="store_true", help="벽 밑을 바닥까지 내리는 벽 치마를 넣지 않는다 (34번의 wall_skirt)")
     parser.add_argument("--floor-support", action="store_true",
                         help="타일마다 바닥 받침 상자(floor_support)를 넣는다. 기본은 뺀다: 받침 아랫면을 바닥으로 읽는 도구는 월드를 올려서 로봇이 못 걷는다")
     parser.add_argument("--texture-px", type=int, default=TEXTURE_PX, help=f"타일 텍스처 한 변 목표 [px] (기본 {TEXTURE_PX}). 전체 픽셀을 단일 파일과 맞추려면 4096 / 타일 수의 제곱근")
@@ -381,6 +399,8 @@ def main():
     P = np.asarray(pcd.points)
     grid = [int(v) for v in args.grid.lower().split("x")] if args.grid else None
     tiles = make_tiles(P, args.tile_size, grid)
+    walls = [] if args.no_wall_skirt else m34.find_walls(P, np.asarray(pcd.normals))     # 벽은 점 전체에서 한 번만 찾는다 (타일에 걸친 벽을 같은 평면으로)
+    print(f"[벽] 큰 수직 벽 평면 {len(walls)}장")
     todo = [t for t in tiles if not args.only or t["name"] in args.only.split(",")]
     out = Path(args.out) if args.out else folder / "tiles"
     print(f"[나누기] 점 {len(P):,}개, 타일 {len(tiles)}개 (만들 것 {len(todo)}개), 재구성에는 경계 바깥 {args.overlap:g} m까지 사용")
@@ -429,6 +449,10 @@ def main():
             print(f"[바닥 패치] 충돌용 바닥 구멍 {before:.1%} → {m34.floor_hole_ratio(collision, P_floor):.1%}, "
                   f"바닥 점이 없는 자리(물체 밑 등) {info['unseen'] * m34.FLOOR_CELL ** 2:.1f} ㎡ 메움 "
                   f"(삼각형 +{n_patch:,}개 → {len(collision.triangles):,}개). 보기용에는 넣지 않는다")
+        if walls:   # 벽 밑이 떠 있는 곳을 바닥까지: 충돌용과 보기용 둘 다 (라이다는 보기용을 본다)
+            collision, visual, n_skirt, winfo = tile_wall_skirt(collision, visual, walls, b)
+            print(f"[벽 치마] 바닥에서 떠 있는 열 {winfo['columns']}개 (폭 {winfo['length']:.1f} m)를 바닥까지 채움, "
+                  f"{m34.SKIRT_MAX:g} m 넘게 떠서 둔 열 {winfo['refused']}개. 삼각형 +{n_skirt:,}개 (충돌용·보기용 각각)")
 
         floor_z = floor_level(pts_tile) if args.floor_support else None
         if floor_z is None:
