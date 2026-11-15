@@ -187,6 +187,32 @@ def test_normal_signs_are_mostly_right(scored):
     assert axis >= 97, f"축이 맞는 점이 {axis}% 뿐이다"
 
 
+def test_las_loader_reads_coordinates_and_color(tmp_path):
+    """LAS 1.2 점 형식 2 파일을 직접 만들어서, 스케일·오프셋을 적용한 좌표와 색을 그대로 읽는지 본다."""
+    import struct
+    import numpy as np
+    sys.path.insert(0, str(ROOT))
+    import loaders
+    rng = np.random.default_rng(0)
+    n, scale, offset = 50, 0.001, np.array([10.0, 20.0, 1.0])
+    ints = np.round((rng.uniform(-5, 5, (n, 3)) - offset) / scale).astype("<i4")
+    rgb = rng.integers(0, 65536, (n, 3)).astype("<u2")
+    rec = np.zeros((n, 26), np.uint8)                      # 점 형식 2: 앞 12 bytes 가 x, y, z, 20번째 byte 부터 R, G, B
+    rec[:, :12] = ints.view(np.uint8).reshape(n, 12)
+    rec[:, 20:26] = rgb.view(np.uint8).reshape(n, 6)
+    header = bytearray(227)
+    header[:4], header[24], header[25], header[104] = b"LASF", 1, 2, 2
+    struct.pack_into("<HI", header, 94, 227, 227)          # 헤더 크기, 점 데이터 시작
+    struct.pack_into("<H", header, 105, 26)
+    struct.pack_into("<I", header, 107, n)
+    struct.pack_into("<6d", header, 131, scale, scale, scale, *offset)
+    path = tmp_path / "t.las"
+    path.write_bytes(bytes(header) + rec.tobytes())
+    pcd = loaders.load_cloud(path)
+    assert np.allclose(np.asarray(pcd.points), ints * scale + offset), "LAS 좌표가 다르다"
+    assert np.allclose(np.asarray(pcd.colors), rgb / 65535.0), "LAS 색이 다르다"
+
+
 def test_prepare_is_deterministic(ws, scan):
     """같은 입력을 두 번 준비하면 파일이 똑같아야 한다 (바닥 맞추기의 RANSAC 시드 고정을 지킨다)."""
     for tag in ("a", "b"):

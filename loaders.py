@@ -8,8 +8,10 @@
 그래야 뒤 단계 코드가 특정 데이터셋에 묶이지 않는다.
 
 지원 형식: .ply .pcd .xyz .xyzn .xyzrgb .pts (Open3D가 직접 읽음), .bin (KITTI: float32 x y z intensity),
-          .e57 (측량 장비 표준 형식, pye57 필요)
+          .e57 (측량 장비 표준 형식, pye57 필요), .las (LAS 1.0~1.4, 압축 안 된 것만)
 """
+import struct
+
 import numpy as np
 import open3d as o3d
 
@@ -25,6 +27,8 @@ def load_cloud(path, scale=1.0):
         pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz.astype(np.float64)))
     elif path.lower().endswith(".e57"):
         pcd = read_e57(path)
+    elif path.lower().endswith(".las"):
+        pcd = read_las(path)
     else:
         pcd = o3d.io.read_point_cloud(path)
     if len(pcd.points) == 0:
@@ -32,6 +36,38 @@ def load_cloud(path, scale=1.0):
     pcd.normals = o3d.utility.Vector3dVector(np.zeros((0, 3)))
     if scale != 1.0:
         pcd.scale(scale, center=(0, 0, 0))
+    return pcd
+
+
+LAS_RGB_OFFSET = {2: 20, 3: 28, 7: 30, 8: 30, 10: 30}   # 점 형식별 색(R, G, B 16비트)이 시작하는 바이트
+
+
+def read_las(path):
+    """LAS를 읽는다 (1.0~1.4, 점 형식 0~3·6~10). 좌표는 정수 x 스케일 + 오프셋이고, 색이 있는 형식이면 같이 읽는다.
+    압축된 LAZ는 못 읽는다. 점 형식마다 앞 12 bytes 는 늘 x, y, z (int32)라서 나머지 필드는 읽지 않는다."""
+    with open(path, "rb") as f:
+        h = f.read(375)
+        if h[:4] != b"LASF":
+            raise ValueError(f"LAS 파일이 아니다: {path}")
+        minor = h[25]
+        if h[104] & 0x80:
+            raise ValueError("압축된 LAZ는 못 읽는다. LAS로 풀어서 쓴다")
+        offset, = struct.unpack_from("<I", h, 96)
+        fmt = h[104] & 0x3F
+        rec, = struct.unpack_from("<H", h, 105)
+        n, = struct.unpack_from("<I", h, 107)
+        if minor >= 4 and n == 0:
+            n, = struct.unpack_from("<Q", h, 247)
+        sx, sy, sz, ox, oy, oz = struct.unpack_from("<6d", h, 131)
+        f.seek(offset)
+        raw = np.fromfile(f, dtype=np.uint8, count=n * rec).reshape(-1, rec)
+    xyz = raw[:, :12].copy().view("<i4").reshape(-1, 3)
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(xyz * np.array([sx, sy, sz]) + np.array([ox, oy, oz])))
+    if fmt in LAS_RGB_OFFSET:
+        o = LAS_RGB_OFFSET[fmt]
+        rgb = raw[:, o:o + 6].copy().view("<u2").reshape(-1, 3).astype(np.float64)
+        if rgb.max() > 0:   # 전부 0 이면 색이 없는 것으로 본다
+            pcd.colors = o3d.utility.Vector3dVector(rgb / (255.0 if rgb.max() <= 255 else 65535.0))
     return pcd
 
 
