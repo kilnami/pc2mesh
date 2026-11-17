@@ -28,9 +28,13 @@
      world.sdf (타일 전부 include + 월드 플러그인), tiles.json (타일 경계)
      충돌 OBJ에는 꼭짓점 법선(vn)을 넣는다. 없으면 Gazebo 물리가 기동 중에 죽는 환경이 있다.
   6) 이음매 확인: 이웃한 두 타일의 경계선 위 점이 상대 타일 메시에서 얼마나 떨어져 있는지 잰다.
+  7) 물체 빼기 (--with-objects): 42번이 나누고 43번이 모델로 만든 물체의 점을 타일 재구성에서 뺀다. 타일은 구조물만 담고,
+     물체는 43번 모델 폴더를 models/ 에 복사해 world.sdf 에서 <pose> 와 함께 include 한다 (objects.json 에 목록).
+     바닥 패치와 벽 치마는 물체 점까지 넣은 전체 점으로 찾는다. 물체를 뺀 자리는 점이 없지만 점으로 둘러싸인 '못 본 바닥'이라서
+     패치가 덮는다 (패치 높이는 주변 메시 바닥을 따른다). 점이 모자라 모델이 안 된 덩어리는 빼지 않고 타일에 남는다.
 
-입력: data/<이름>/normals.ply, inspect.json (31, 32번 결과)
-출력: data/<이름>/tiles/ (world.sdf, tiles.json, models/), data/<이름>/tiles_report.json
+입력: data/<이름>/normals.ply, inspect.json (31, 32번 결과). --with-objects 면 objects.npz (42번)와 objects/ (43번)도
+출력: data/<이름>/tiles/ (world.sdf, tiles.json, models/ (+ 물체 모델, objects.json)), data/<이름>/tiles_report.json
 
 실행:
   python 38_tiles.py factory --grid 2x2 --gt data/factory/gt/prepared.ply
@@ -134,6 +138,10 @@ README = """{name} 타일 월드 (점군 → 메시 변환, 타일 {n}개)
 {support}  - 텍스처 파일 이름이 타일마다 다르다 (texture_<타일>.jpg). 모델마다 texture.jpg 로 같으면 Gazebo 가 한 텍스처를 모든 타일에 쓴다.
     visual.mtl 은 texture_<타일>.jpg 를 가리킨다. 같은 내용의 texture.jpg 사본을 폴더마다 함께 두었다 (플랫폼이 이 이름을 찾을 때용).
   - 층 나누기는 아직 없다 (level 은 전부 {level}).
+{objects}"""
+
+README_OBJECTS = """  - 물체 {n}개는 타일이 아니라 models/<물체>/ 모델로 따로 들어 있고 world.sdf 가 <pose> 와 함께 include 한다 (목록: objects.json).
+    물체 모델의 원점은 물체 바닥 중심이고 메시는 그 원점 기준 좌표다. 타일에는 물체 점이 빠져 있다. 모델은 static 이다.
 """
 
 
@@ -166,7 +174,7 @@ def floor_level(P):
     return round(float(np.percentile(z, FLOOR_PCT)), 3) if len(z) else 0.0
 
 
-def poisson_trim(pcd, voxel, depth=None):
+def poisson_trim(pcd, voxel, depth=None, quantile=None):
     """Poisson 재구성 + 밀도 trim (33번과 같은 방법). depth는 이 점 묶음에서 칸 크기(= 묶음 크기 x 1.1 / 2^depth)가
     voxel에 가장 가깝게 정한다. 31번은 '칸이 voxel 이하'가 되게 올려 잡지만, 작은 점 묶음(타일)에서 voxel보다 촘촘한
     칸을 쓰면 점이 닿지 않는 칸에서 꼭짓점 색이 어두워졌다 (공장 타일 하나에서 색 밝기 중앙값: 점 0.366,
@@ -175,7 +183,8 @@ def poisson_trim(pcd, voxel, depth=None):
     depth = depth or int(np.round(np.log2(extent * 1.1 / voxel)))
     mesh, density = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
     density = np.asarray(density)
-    mesh.remove_vertices_by_mask(density < np.quantile(density, m33.DENSITY_QUANTILE))
+    quantile = m33.DENSITY_QUANTILE if quantile is None else quantile
+    mesh.remove_vertices_by_mask(density < np.quantile(density, quantile))
     return mesh, depth, extent * 1.1 / 2 ** depth
 
 
@@ -307,8 +316,9 @@ def model_sdf(tile, floor_z=None):
                                     cz=floor_z - SUPPORT_THICK / 2, sx=x1 - x0, sy=y1 - y0, sz=SUPPORT_THICK)
 
 
-def write_tile(folder, tile, visual, collision, floor_z=None):
-    """models/<타일>/ 에 파일을 쓰고 (텍스처 한 변 px, 파일 크기 MB 딕셔너리)를 돌려준다. floor_z 는 바닥 받침 윗면 높이 (None 이면 받침 없음)."""
+def write_tile(folder, tile, visual, collision, floor_z=None, config=MODEL_CONFIG):
+    """models/<타일>/ 에 파일을 쓰고 (텍스처 한 변 px, 파일 크기 MB 딕셔너리)를 돌려준다. floor_z 는 바닥 받침 윗면 높이 (None 이면 받침 없음).
+    물체 모델(43번)도 이 함수로 쓴다 (tile = {name, bounds}, config = 그 파일 이름을 적은 model.config 양식)."""
     folder.mkdir(parents=True, exist_ok=True)
     textured, cell, size = m34.bake_texture(visual)
     collision = o3d.geometry.TriangleMesh(collision)
@@ -323,7 +333,7 @@ def write_tile(folder, tile, visual, collision, floor_z=None):
     mtl = folder / "visual.mtl"
     mtl.write_text(mtl.read_text().replace("visual_0.png", texture))
     o3d.io.write_triangle_mesh(str(folder / "collision.obj"), collision)   # 꼭짓점 법선(vn) 포함
-    (folder / "model.config").write_text(MODEL_CONFIG.format(name=tile["name"]))
+    (folder / "model.config").write_text(config.format(name=tile["name"]))
     (folder / "model.sdf").write_text(model_sdf(tile, floor_z))
     sizes = {f.name: f.stat().st_size / 2 ** 20 for f in folder.iterdir()}
     return size, sizes
@@ -386,6 +396,11 @@ def main():
     parser.add_argument("--collision-total", type=int, help="타일 전체의 충돌용 삼각형 상한. 타일 면적에 비례해 나눈다 (예: 100000)")
     parser.add_argument("--no-floor-patch", action="store_true", help="충돌용 메시의 바닥 구멍 패치를 넣지 않는다 (34번의 floor_patch)")
     parser.add_argument("--no-wall-skirt", action="store_true", help="벽 밑을 바닥까지 내리는 벽 치마를 넣지 않는다 (34번의 wall_skirt)")
+    parser.add_argument("--density-quantile", type=float,
+                        help=f"Poisson 밀도 trim: 점 밀도 하위 이 비율의 꼭짓점을 자른다 (기본 33번과 같은 {m33.DENSITY_QUANTILE}). "
+                             "--with-objects 로 물체를 빼면 가짜 면이 줄어서 이 비율이 진짜 벽·천장 가장자리를 깎는다 (합성 방에서 구조물 완성도 96.4%, 0.01 이면 99.8%)")
+    parser.add_argument("--with-objects", action="store_true",
+                        help="43번이 만든 물체 모델(data/<이름>/objects/)을 월드에 include 하고, 그 물체의 점은 타일에서 뺀다")
     parser.add_argument("--floor-support", action="store_true",
                         help="타일마다 바닥 받침 상자(floor_support)를 넣는다. 기본은 뺀다: 받침 아랫면을 바닥으로 읽는 도구는 월드를 올려서 로봇이 못 걷는다")
     parser.add_argument("--texture-px", type=int, default=TEXTURE_PX, help=f"타일 텍스처 한 변 목표 [px] (기본 {TEXTURE_PX}). 전체 픽셀을 단일 파일과 맞추려면 4096 / 타일 수의 제곱근")
@@ -399,7 +414,12 @@ def main():
     P = np.asarray(pcd.points)
     grid = [int(v) for v in args.grid.lower().split("x")] if args.grid else None
     tiles = make_tiles(P, args.tile_size, grid)
-    walls = [] if args.no_wall_skirt else m34.find_walls(P, np.asarray(pcd.normals))     # 벽은 점 전체에서 한 번만 찾는다 (타일에 걸친 벽을 같은 평면으로)
+    keep, object_rows = np.ones(len(P), bool), []   # keep: 타일 재구성에 쓸 점 (구조물). 물체 모델이 된 덩어리의 점은 뺀다
+    if args.with_objects:
+        object_rows = json.loads((folder / "objects" / "objects.json").read_text())["objects"]
+        keep = ~np.isin(np.load(folder / "objects.npz")["labels"], [r["id"] for r in object_rows])
+        print(f"[물체] 모델 {len(object_rows)}개의 점 {int((~keep).sum()):,}개를 타일에서 뺀다 (구조물 점 {int(keep.sum()):,}개)")
+    walls =[] if args.no_wall_skirt else m34.find_walls(P, np.asarray(pcd.normals))     # 벽은 점 전체에서 한 번만 찾는다 (타일에 걸친 벽을 같은 평면으로)
     print(f"[벽] 큰 수직 벽 평면 {len(walls)}장")
     todo = [t for t in tiles if not args.only or t["name"] in args.only.split(",")]
     out = Path(args.out) if args.out else folder / "tiles"
@@ -416,13 +436,13 @@ def main():
         t0 = time.time()
         b = t["bounds"]
         print(f"\n===== {t['name']} =====")
-        pts_tile = P[in_bounds(P, b)]
-        ext = pcd.select_by_index(np.flatnonzero(in_bounds(P, b, args.overlap)))
+        pts_tile = P[in_bounds(P, b) & keep]
+        ext = pcd.select_by_index(np.flatnonzero(in_bounds(P, b, args.overlap) & keep))
         P_ext = np.asarray(ext.points)
         # 바닥 구멍 검사에 쓸 점: 경계 칸이 반쯤 타일 밖으로 나가 구멍으로 잘못 세이지 않게 안쪽만
         P_floor = P[in_bounds(P, [b[0] + m34.FLOOR_CELL, b[1] + m34.FLOOR_CELL, b[2] - m34.FLOOR_CELL, b[3] - m34.FLOOR_CELL])]
 
-        raw, depth, cell = poisson_trim(ext, voxel, args.depth)
+        raw, depth, cell = poisson_trim(ext, voxel, args.depth, args.density_quantile)
         print(f"[재구성] 점 {len(P_ext):,}개 (타일 안 {len(pts_tile):,}개), depth {depth} (칸 {cell * 100:.1f} cm): "
               f"삼각형 {len(raw.triangles):,}개 ({time.time() - t0:.0f}초)")
         mesh, rep = m34.clean(raw, P_ext, voxel)
@@ -483,6 +503,9 @@ def main():
         merged = o3d.geometry.TriangleMesh()
         for m in meshes.values():
             merged += m["visual"]
+        for r in object_rows:   # 물체 모델도 월드 자리에 놓고 합친다 (타일에서는 물체가 빠져 있다)
+            m = o3d.io.read_triangle_mesh(str(folder / "objects" / "models" / r["name"] / "visual.obj"))
+            merged += m.translate(r["pose"][:3])
         acc, comp, f = m33.evaluate(merged, gt, G[inside(G[:, :2])], inside)
         print(f"\n[정답 비교] 타일 보기용 메시를 합친 것: 정확도 {acc:.1%}, 완성도 {comp:.1%}, F {f:.1%}")
         report["gt"] = dict(accuracy=float(acc), completeness=float(comp), f=float(f))
@@ -491,18 +514,29 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     includes = "".join(f'    <include>\n      <uri>model://{t["name"]}</uri>\n      <name>{t["name"]}</name>\n    </include>\n'
                        for t in todo)
+    for r in object_rows:   # 물체 모델: 폴더를 복사하고 원점을 놓을 자리(pose)와 함께 include
+        shutil.copytree(folder / "objects" / "models" / r["name"], out / "models" / r["name"], dirs_exist_ok=True)
+        includes += (f'    <include>\n      <uri>model://{r["name"]}</uri>\n      <name>{r["name"]}</name>\n'
+                     f'      <pose>{" ".join(f"{v:g}" for v in r["pose"])}</pose>\n    </include>\n')
+    if object_rows:
+        shutil.copyfile(folder / "objects" / "objects.json", out / "objects.json")
     (out / "world.sdf").write_text(WORLD_SDF.format(world=WORLD.format(name=args.name.replace("/", "_")),
                                                     plugins=PLUGINS, includes=includes))
     lines = ",\n".join("    " + json.dumps(dict(model=t["name"], level=LEVEL, bounds=[float(v) for v in t["bounds"]]))
                        for t in todo)  # 타일 하나가 한 줄
     (out / "tiles.json").write_text('{\n  "schema": "world_tiles/v1",\n  "tiles": [\n' + lines + "\n  ]\n}\n")
     (out / "README.txt").write_text(README.format(name=args.name, n=len(todo), level=LEVEL,
-                                                  support=README_SUPPORT if args.floor_support else README_NO_SUPPORT))
+                                                  support=README_SUPPORT if args.floor_support else README_NO_SUPPORT,
+                                                  objects=README_OBJECTS.format(n=len(object_rows)) if object_rows else ""))
     vis_sum = sum(t["visual_triangles"] for t in report["tiles"])
     col_sum = sum(t["collision_triangles"] for t in report["tiles"])
     print(f"\n[월드] 타일 {len(todo)}개: 보기용 삼각형 합 {vis_sum:,}개 (예산 3,000만), 충돌용 합 {col_sum:,}개 → {out}/")
     print(f"  world.sdf, tiles.json, models/ ({time.time() - t_all:.0f}초)")
     report["totals"] = dict(visual_triangles=vis_sum, collision_triangles=col_sum)
+    if object_rows:
+        obj_vis, obj_col = (sum(r[k] for r in object_rows) for k in ("visual_triangles", "collision_triangles"))
+        print(f"  + 물체 모델 {len(object_rows)}개: 보기용 삼각형 {obj_vis:,}개, 충돌용 {obj_col:,}개 (위 합계에는 안 들어 있다)")
+        report["objects"] = dict(count=len(object_rows), visual_triangles=obj_vis, collision_triangles=obj_col)
     (folder / "tiles_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
 

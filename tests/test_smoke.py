@@ -145,6 +145,33 @@ def nav2(ws, tiles):
 
 
 @pytest.fixture(scope="session")
+def objects(ws):
+    """가구 많은 합성 방(--clutter)을 처음부터 돌려 물체를 나눈다. 정답 물체는 21번이 안다."""
+    ws.run("21_make_synth_room.py", "--clutter", "--no-view")
+    ws.run("31_prepare.py", "data/synth_clutter.ply", "--name", "synth_clutter",
+           "--sensors", "data/synth_clutter_sensors.npy", "--no-view")
+    ws.run("32_clean_normals.py", "synth_clutter", "--no-view")
+    return ws.run("42_objects.py", "synth_clutter", "--score-synth")
+
+
+@pytest.fixture(scope="session")
+def object_models(ws, objects):
+    return ws.run("43_object_models.py", "synth_clutter", "--score-synth")
+
+
+@pytest.fixture(scope="session")
+def object_world(ws, object_models):
+    """물체를 뺀 구조물 타일 + 물체 모델을 include 한 월드. 물체를 빼면 가짜 면이 줄어서 밀도 trim 을 낮춘다 (38번 --density-quantile)."""
+    return ws.run("38_tiles.py", "synth_clutter", "--grid", "2x1", "--with-objects", "--density-quantile", "0.01",
+                  "--out", "data/synth_clutter/tiles_obj")
+
+
+@pytest.fixture(scope="session")
+def seg_scores(ws, objects):
+    return ws.run("47_score_seg.py", "synth_clutter")
+
+
+@pytest.fixture(scope="session")
 def support_variant(ws, cleaned):
     """받침을 넣어 만든 타일 패키지와, 거기서 받침을 뺀 사본. tiles 와 폴더가 겹치지 않게 따로 만든다."""
     dst = ws.data("synth_room_support")
@@ -213,6 +240,34 @@ def test_las_loader_reads_coordinates_and_color(tmp_path):
     assert np.allclose(np.asarray(pcd.colors), rgb / 65535.0), "LAS 색이 다르다"
 
 
+def test_find_walls_scales_width_rule_to_small_rooms():
+    """3.0 x 2.0 m 방: 짧은 벽(2.0 m)은 폭 기준 3 m 에 걸려서 4장 중 2장만 찾았다. 폭 기준을 방 크기에 맞추면 4장 다 찾는다 (S3DIS 사무실의 서쪽 벽 2.95 m 가 같은 이유로 빠졌다)."""
+    import importlib
+    import numpy as np
+    sys.path.insert(0, str(ROOT))
+    m34 = importlib.import_module("34_export")
+    rng = np.random.default_rng(0)
+    pts, nrm = [], []
+    sx, sy, h, step = 3.0, 2.0, 2.5, 0.015
+    for axis, length, fixed, normal in [(0, sx, 0.0, (0, 1)), (0, sx, sy, (0, -1)), (1, sy, 0.0, (1, 0)), (1, sy, sx, (-1, 0))]:
+        u, z = np.meshgrid(np.arange(0, length, step), np.arange(0.0, h, step))
+        u, z = u.ravel(), z.ravel()
+        xy = np.c_[u, np.full_like(u, fixed)] if axis == 0 else np.c_[np.full_like(u, fixed), u]
+        pts.append(np.c_[xy + rng.normal(0, 0.003, xy.shape), z])
+        nrm.append(np.tile([normal[0], normal[1], 0.0], (len(u), 1)))
+    P, N = np.vstack(pts), np.vstack(nrm)
+    rule = m34.WALL_MIN_REL
+    try:
+        m34.WALL_MIN_REL = 1e9                   # 예전 규칙: 폭 3 m 고정
+        old = len(m34.find_walls(P, N))
+        m34.WALL_MIN_REL = rule
+        new = len(m34.find_walls(P, N))
+    finally:
+        m34.WALL_MIN_REL = rule
+    assert old == 2, f"예전 규칙에서는 긴 벽 2장만 찾아야 시험이 의미가 있다: {old}장"
+    assert new == 4, f"방 크기에 맞춘 규칙은 벽 4장을 찾아야 한다: {new}장"
+
+
 def test_prepare_is_deterministic(ws, scan):
     """같은 입력을 두 번 준비하면 파일이 똑같아야 한다 (바닥 맞추기의 RANSAC 시드 고정을 지킨다)."""
     for tag in ("a", "b"):
@@ -254,6 +309,85 @@ def test_export_adds_wall_skirt_to_both_meshes(export):
     walls, columns = number(m.group(1)), number(m.group(2))
     assert walls == 4, f"합성 방의 벽은 4장이다: {walls:.0f}장을 찾았다"
     assert columns >= 3, f"떠 있는 벽 열을 {columns:.0f}개만 채웠다 (합성 방은 약 10개)"
+
+
+def test_objects_are_split_from_structure(ws, objects):
+    """합성 방의 정답 물체 9개 중 8개를 한 덩어리로 찾는다 (책상 하나는 상판 밑면이 거의 안 찍혀 둘로 쪼개진다).
+    구조물(벽 4장, 지붕 1층)은 빼고, 물체로 나온 점은 거의 다 정답 물체 점이어야 한다."""
+    m = grab(objects, r"정답 물체 (\d+)개 중 ok (\d+)개\. 물체 덩어리 (\d+)개 중 대부분이 정답 물체가 아닌 것 (\d+)개", "채점 요약")
+    total, ok, _, fake = (number(g) for g in m.groups())
+    assert ok >= 7, f"정답 물체 {total:.0f}개 중 {ok:.0f}개만 맞게 나눴다 (합성 방은 8개)\n" + objects[-2500:]
+    assert fake == 0, f"정답 물체가 아닌 점이 대부분인 덩어리가 {fake:.0f}개 나왔다"
+    assert "벽 4장" in objects, "합성 방의 벽은 4장이다"
+    assert len(json.loads(ws.data("synth_clutter", "objects.json").read_text())["objects"]) >= 9
+
+
+def test_ap_and_pq_follow_hand_computed_cases():
+    """정답 단위 둘(A: 0~39, B: 40~79)과 void 20점의 작은 예제를 손으로 계산한 값과 맞춘다.
+    완벽 → AP25·AP50·PQ 모두 1. 둘이 한 덩어리 → IoU 가 0.5 라서 AP25 0.5, AP50 0, PQ 0. A 가 둘로 쪼개짐 → AP25 2/3, AP50 1/6, PQ 0.4.
+    void 위의 예측은 틀린 예측으로 세지 않는다. 점수가 있으면 PR 곡선을 그리고, 없으면 AP = 정밀도 x 재현율 이다."""
+    import importlib
+    import numpy as np
+    sys.path.insert(0, str(ROOT))
+    m47 = importlib.import_module("47_score_seg")
+
+    def seg(*ranges):
+        a = np.full(100, -1)
+        for k, (s, e) in enumerate(ranges):
+            a[s:e] = k
+        return a
+
+    gt, valid = seg((0, 40), (40, 80)), np.ones(100, bool)
+    valid[80:] = False
+
+    def score(pred):
+        return [m47.instance_ap(pred, gt, valid, t)["ap"] for t in (0.25, 0.5)] + [m47.panoptic_things(pred, gt, valid)["pq"]]
+
+    on_void = np.where(np.arange(100) >= 80, 2, seg((0, 40), (40, 80)))
+    for name, pred, want in [("완벽", seg((0, 40), (40, 80)), [1, 1, 1]), ("둘이 합침", seg((0, 80)), [0.5, 0, 0]),
+                             ("A 가 쪼개짐", seg((0, 20), (20, 40), (40, 80)), [2 / 3, 1 / 6, 0.4]), ("void 위 예측", on_void, [1, 1, 1])]:
+        assert score(pred) == pytest.approx(want), f"{name}: {score(pred)} (손으로 구한 값 {want})"
+
+    pred = np.full(100, -1)                      # 0: A, 1: B, 2·3: 정답 없는 곳의 가짜 (void 가 없으면 틀린 예측)
+    pred[0:40], pred[40:80], pred[80:90], pred[90:100] = 0, 1, 2, 3
+    everything = np.ones(100, bool)
+    ranked = m47.instance_ap(pred, gt, everything, 0.5, scores={0: 0.9, 1: 0.8, 2: 0.95, 3: 0.1})["ap"]
+    assert ranked == pytest.approx(2 / 3), f"가짜가 맨 앞과 맨 뒤에 있을 때 PR 곡선 AP: {ranked}"
+    assert m47.instance_ap(pred, gt, everything, 0.5)["ap"] == pytest.approx(0.5), "점수가 없으면 AP = 정밀도(0.5) x 재현율(1)"
+
+
+def test_seg_scores_on_synth_room(ws, seg_scores):
+    """합성 방: 정답 물체 9개를 IoU > 0.5 로 전부 맞추고, 책상·배관이 조각난 틀린 예측이 3개 있다 (AP50 0.75, PQ 0.91)."""
+    ap25, ap50 = (number(g) for g in grab(seg_scores, r"AP25 ([\d.]+)\s+AP50 ([\d.]+)", "AP").groups())
+    pq, things, stuff = (number(g) for g in grab(seg_scores, r"PQ ([\d.]+)\s+\(물체 ([\d.]+), 구조물 ([\d.]+)\)", "PQ").groups())
+    assert ap50 >= 0.6 and ap25 >= ap50, f"AP25 {ap25}, AP50 {ap50} (합성 방은 0.75, 0.75)\n" + seg_scores[-2500:]
+    assert pq >= 0.85 and things >= 0.65 and stuff >= 0.9, f"PQ {pq} (물체 {things}, 구조물 {stuff}). 합성 방은 0.91 (0.77, 0.96)"
+    assert ws.data("synth_clutter", "score_seg.json").exists()
+
+
+def test_object_models_match_ground_truth(ws, object_models):
+    """물체 덩어리마다 모델 폴더를 만든다 (합성 방 11개). 정답 물체 표면 3 cm 이내 비율이 평균 정확도 92.8%, 완성도 93.9% 였다."""
+    n = number(grab(object_models, r"\[저장\] 모델 (\d+)개", "모델 수").group(1))
+    assert n >= 9, f"물체 모델이 {n:.0f}개뿐이다 (합성 방은 11개)"
+    acc, comp = (number(g) for g in grab(object_models, r"정답 비교 평균: 정확도 ([\d.]+)%, 완성도 ([\d.]+)%", "정답 비교").groups())
+    assert acc >= 85 and comp >= 85, f"물체 모델이 정답과 많이 다르다: 정확도 {acc}%, 완성도 {comp}%"
+    for model in sorted(ws.data("synth_clutter", "objects", "models").iterdir()):
+        for name in ("visual.obj", "collision.obj", "model.sdf", "model.config"):
+            assert (model / name).exists(), f"{model.name}/{name} 이 없다"
+
+
+def test_object_world_includes_models_and_covers_floor(ws, object_world):
+    """월드가 물체 모델을 pose 와 함께 include 하고, 타일에서 물체를 뺀 자리의 바닥 구멍을 패치가 덮는다."""
+    pkg = ws.data("synth_clutter", "tiles_obj")
+    world = (pkg / "world.sdf").read_text()
+    posed = re.findall(r"<uri>model://f1_obj_\d+</uri>\s*<name>[^<]*</name>\s*<pose>([^<]*)</pose>", world)
+    assert len(posed) >= 9, f"pose 가 있는 물체 include 가 {len(posed)}개뿐이다 (합성 방은 11개)"
+    assert all(len(p.split()) == 6 for p in posed), f"pose 는 x y z roll pitch yaw 여섯 개여야 한다: {posed[:2]}"
+    assert "f1_struct_x0y0" in world and "f1_struct_x1y0" in world, "타일 include 가 빠졌다"
+    assert len(json.loads((pkg / "objects.json").read_text())["objects"]) == len(posed)
+    holes = [number(g) for g in re.findall(r"\[바닥 패치\] 충돌용 바닥 구멍 [\d.]+% → ([\d.]+)%", object_world)]
+    assert len(holes) == 2 and max(holes) <= 0.5, f"물체를 뺀 뒤에도 바닥 구멍이 남았다: {holes}"
+    assert re.search(r"\[물체\] 모델 \d+개의 점 [\d,]+개를 타일에서 뺀다", object_world), "타일에서 물체 점을 뺀다는 줄이 없다"
 
 
 def test_pybullet_loads_the_collision_mesh(pybullet):
