@@ -94,15 +94,17 @@ FILL_ITER = int(FILL_MAX / FLOOR_CELL)
 WALL_BAND = 0.06           # 벽 치마: 벽 평면에서 이 안의 점을 벽 점으로 본다 [m]
 WALL_MIN_POINTS = 5000     # 벽 치마: 평면 하나로 인정하는 벽 점 수 (바닥 위 0.3~2 m, 법선이 수평)
 WALL_MIN_WIDTH = 3.0       # 벽 치마: 평면의 폭이 이 이상이어야 벽으로 본다 [m]
-WALL_MIN_FILL = 0.5        # 벽 치마: 벽 범위(폭 x 바닥 위 0.3~2 m)를 10 cm 칸으로 나눴을 때 점이 있는 칸이 이 비율 이상이어야 벽으로 본다
+WALL_MIN_REL = 0.4         # 벽 치마: 작은 방·복도는 벽 자체가 3 m 가 안 된다. 폭 기준을 min(WALL_MIN_WIDTH, 이 비율 x 그 방향 장면 크기)로 낮춘다 (큰 장면은 3 m 그대로)
+WALL_MIN_FILL = 0.325      # 벽 치마: 벽 범위(폭 x 바닥 위 0.3~2 m)를 10 cm 칸으로 나눴을 때 점이 있는 칸이 이 비율 이상이어야 벽으로 본다.
+                           # 후보 평면 35개의 채움 비율은 가짜(기둥 줄, 기계 면, 복도 안쪽 물건)가 10~29%, 진짜 벽이 35%(문이 많은 복도 벽)~100%였다. 그 틈(29~35%)의 가운데다
 WALL_CELL = 0.10           # 벽 치마: 벽을 펼친 칸 크기 [m]
 SKIRT_MAX = 1.0            # 벽 치마: 벽이 처음 나오는 높이가 이 이하일 때만 바닥까지 내린다 [m]. 더 높이 떠 있으면 문 같은 열린 곳으로 보고 둔다
 SKIRT_MIN_RUN = 3          # 벽 치마: 처음 나온 벽 위로 이만큼(칸) 이어져야 벽으로 본다 (떨어진 조각 하나는 벽이 아니다)
 TEXTURE_MAX = 4096         # 텍스처 이미지 한 변의 목표 최대 [px]. 삼각형 칸은 4~16 px (삼각형이 많으면 작아짐)
 
 
-def clean(mesh, P, voxel):
-    """2) 정리. 정리한 메시와 단계별 제거 개수를 돌려준다."""
+def clean(mesh, P, voxel, min_piece=MIN_PIECE):
+    """2) 정리. 정리한 메시와 단계별 제거 개수를 돌려준다. min_piece 장 미만 조각은 지운다 (작은 물체는 낮춰서 쓴다)."""
     mesh = o3d.geometry.TriangleMesh(mesh)
     report = {}
     V, T = np.asarray(mesh.vertices), np.asarray(mesh.triangles)
@@ -117,9 +119,9 @@ def clean(mesh, P, voxel):
         mesh.remove_triangles_by_mask(far)
         report[f"점에서 {TRIM_X * voxel * 100:.0f} cm 넘게 떨어짐"] = int(far.sum())
     labels, counts, _ = mesh.cluster_connected_triangles()
-    small = np.asarray(counts)[np.asarray(labels)] < MIN_PIECE
+    small = np.asarray(counts)[np.asarray(labels)] < min_piece
     mesh.remove_triangles_by_mask(small)
-    report[f"{MIN_PIECE}장 미만 조각"] = int(small.sum())
+    report[f"{min_piece}장 미만 조각"] = int(small.sum())
     mesh.remove_unreferenced_vertices()
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
@@ -305,8 +307,8 @@ def add_floor_patch(collision, P, bounds=None):
 def find_walls(P, N):
     """점군에서 큰 수직 벽 평면을 찾는다: [{n, t, d, inward, u0, u1, top}].
     벽 점 = 법선이 거의 수평이고 바닥 위 0.3~2 m. 법선 방향의 가장 많은 쪽과 거기에 직교하는 쪽(직각 건물 가정)에서,
-    평면까지의 거리를 2 cm 칸으로 세어 점이 몰린 곳(WALL_MIN_POINTS 이상)을 평면으로 본다. 폭이 WALL_MIN_WIDTH 이상이고, 벽 범위 중 점이 있는 칸이
-    WALL_MIN_FILL 이상이어야 한다 (진짜 벽은 62~100%, 인천 지하철 역사의 기둥 줄과 공장의 기계 면은 9~29%였다).
+    평면까지의 거리를 2 cm 칸으로 세어 점이 몰린 곳(WALL_MIN_POINTS 이상)을 평면으로 본다. 폭이 min(WALL_MIN_WIDTH, WALL_MIN_REL x 그 방향 장면 크기) 이상이고, 벽 범위 중 점이 있는 칸이
+    WALL_MIN_FILL 이상이어야 한다 (진짜 벽은 35~100%, 인천 지하철 역사의 기둥 줄과 공장의 기계 면, 복도 안쪽 물건은 10~29%였다).
     n: 법선(xy), t: 벽을 따라가는 방향, d: P·n 의 값, inward: 방 안쪽을 가리키는 부호, u0~u1: 벽의 범위, top: 벽 높이."""
     h = (np.abs(N[:, 2]) < 0.25) & (P[:, 2] > 0.3) & (P[:, 2] < 2.0)
     if h.sum() < WALL_MIN_POINTS:
@@ -323,6 +325,8 @@ def find_walls(P, N):
         dist = P[h & (da < 8), :2] @ n
         if len(dist) < WALL_MIN_POINTS:
             continue
+        along = P[:, :2] @ t                                                          # 벽을 따라가는 방향의 장면 크기 (바깥 점 0.5% 제외)
+        min_width = min(WALL_MIN_WIDTH, WALL_MIN_REL * (np.percentile(along, 99.5) - np.percentile(along, 0.5)))
         counts, edges = np.histogram(dist, bins=np.arange(dist.min(), dist.max() + 0.02, 0.02))
         smooth = np.convolve(counts, np.ones(3), "same")
         peaks = []
@@ -336,7 +340,7 @@ def find_walls(P, N):
             near = np.abs(P[:, :2] @ n - c) < WALL_BAND
             u, z = P[near, :2] @ t, P[near, 2]
             u0, u1, top = np.percentile(u, 0.5), np.percentile(u, 99.5), np.percentile(z, 99)
-            if u1 - u0 < WALL_MIN_WIDTH or top < 1.5:
+            if u1 - u0 < min_width or top < 1.5:
                 continue
             nu, nv = int((u1 - u0) / WALL_CELL) + 1, int(1.7 / WALL_CELL)       # 벽 범위 중 점이 있는 칸의 비율: 같은 평면에 늘어선 기둥·기계 면은 듬성듬성하다
             filled = np.zeros((nu, nv), bool)
